@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
-use bevy::app::{App, Plugin, PluginGroup, PluginGroupBuilder};
-use bevy::asset::HandleUntyped;
-use bevy::DefaultPlugins;
+use bevy::app::PluginGroupBuilder;
+use bevy::core::Stopwatch;
+use bevy::prelude::*;
+use bevy::utils::HashMap;
 
 fn main() {
     App::new()
@@ -35,6 +34,14 @@ impl Plugin for ConfigPlugin {
             path: PathConfig {
                 font: "fonts/zkgn/ZenKakuGothicNew-Regular.ttf",
             },
+            key: KeyConfig {
+                title: TitleKeyConfig {
+                    up: KeyCode::K,
+                    down: KeyCode::J,
+                    submit: KeyCode::Return,
+                },
+                game: GameKeyConfig,
+            },
         };
 
         app.insert_resource(config);
@@ -43,11 +50,25 @@ impl Plugin for ConfigPlugin {
 
 struct Config {
     path: PathConfig,
+    key: KeyConfig,
 }
 
 struct PathConfig {
     font: &'static str,
 }
+
+struct KeyConfig {
+    title: TitleKeyConfig,
+    game: GameKeyConfig,
+}
+
+struct TitleKeyConfig {
+    up: KeyCode,
+    down: KeyCode,
+    submit: KeyCode,
+}
+
+struct GameKeyConfig;
 
 struct StagePlugin;
 impl Plugin for StagePlugin {
@@ -55,11 +76,6 @@ impl Plugin for StagePlugin {
 
     fn build(&self, app: &mut App) { app.add_state(Stage::Initial).add_system(end_on_3_esc_press); }
 }
-
-use bevy::core::{Stopwatch, Time};
-use bevy::ecs::system::ResMut;
-use bevy::input::keyboard::KeyCode;
-use bevy::input::Input;
 
 fn end_on_3_esc_press(
     mut count: Local<u8>,
@@ -98,6 +114,8 @@ fn end_on_3_esc_press(
 enum Stage {
     Initial,
     Title,
+    Settings,
+    Infos,
     Game,
     End,
 }
@@ -116,9 +134,6 @@ impl Plugin for AssetPlugin {
 struct AssetStore {
     store: HashMap<&'static str, HandleUntyped>,
 }
-
-use bevy::ecs::schedule::State;
-use bevy::ecs::system::{Local, Res};
 
 struct LogPlugin;
 impl Plugin for LogPlugin {
@@ -148,11 +163,8 @@ fn on_stage_changed(mut before: Local<Option<Stage>>, stage: Res<State<Stage>>) 
 
 mod stag {
     pub mod initial {
-        use bevy::app::{App, Plugin as PluginTrait};
-        use bevy::asset::AssetServer;
-        use bevy::ecs::event::{EventReader, EventWriter};
-        use bevy::ecs::schedule::{State, SystemSet};
-        use bevy::ecs::system::{Res, ResMut};
+        use bevy::app::Plugin as PluginTrait;
+        use bevy::prelude::*;
 
         use crate::Stage::Initial as SelfStage;
         use crate::{AssetStore, Config, Stage};
@@ -191,14 +203,11 @@ mod stag {
     }
 
     pub mod title {
-        use bevy::app::{App, Plugin as PluginTrait};
-        use bevy::ecs::event::{EventReader, EventWriter};
-        use bevy::ecs::schedule::{State, SystemSet};
-        use bevy::ecs::system::{Commands, Res, ResMut};
-        use bevy::input::keyboard::KeyCode;
-        use bevy::input::Input;
+        use bevy::app::Plugin as PluginTrait;
+        use bevy::prelude::*;
 
         use crate::Stage::Title as SelfStage;
+        use crate::{AssetStore, Config, Stage};
 
         pub struct Plugin;
         impl PluginTrait for Plugin {
@@ -206,9 +215,17 @@ mod stag {
 
             fn build(&self, app: &mut App) {
                 app.add_event::<CursorInput>();
-                app.add_state(CursorState::Start);
+                app.add_event::<CursorSubmit>();
+                app.insert_resource(CursorState::Start);
+
                 app.add_system_set(SystemSet::on_enter(SelfStage).with_system(spawn_ui));
-                app.add_system_set(SystemSet::on_update(SelfStage).with_system(cursor_input));
+                app.add_system_set(
+                    SystemSet::on_update(SelfStage)
+                        .with_system(cursor_input)
+                        .with_system(cursor_handle)
+                        .with_system(detect_move)
+                        .with_system(update_ui),
+                );
                 app.add_system_set(SystemSet::on_exit(SelfStage).with_system(despawn_ui));
             }
         }
@@ -216,6 +233,7 @@ mod stag {
         enum CursorInput {
             Up,
             Down,
+            Submit,
         }
 
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -225,14 +243,59 @@ mod stag {
             Infos,
             Exit,
         }
+        impl CursorState {
+            fn next(&self) -> Self {
+                match *self {
+                    Self::Start => Self::Settings,
+                    Self::Settings => Self::Infos,
+                    Self::Infos => Self::Exit,
+                    Self::Exit => Self::Exit,
+                }
+            }
 
-        use bevy::render::color::Color;
-        use bevy::text::{HorizontalAlign, Text, TextAlignment, TextStyle, VerticalAlign};
-        use bevy::ui::entity::TextBundle;
+            fn prev(&self) -> Self {
+                match *self {
+                    Self::Start => Self::Start,
+                    Self::Settings => Self::Start,
+                    Self::Infos => Self::Settings,
+                    Self::Exit => Self::Infos,
+                }
+            }
 
-        use crate::AssetStore;
+            fn as_str(&self) -> &str {
+                match *self {
+                    Self::Start => "Start",
+                    Self::Settings => "Settings",
+                    Self::Infos => "Infos",
+                    Self::Exit => "Exit",
+                }
+            }
+        }
+
+        enum CursorSubmit {
+            Start,
+            Settings,
+            Infos,
+            Exit,
+        }
+        impl From<CursorState> for CursorSubmit {
+            fn from(from: CursorState) -> Self {
+                match from {
+                    CursorState::Start => Self::Start,
+                    CursorState::Settings => Self::Settings,
+                    CursorState::Infos => Self::Infos,
+                    CursorState::Exit => Self::Exit,
+                }
+            }
+        }
 
         fn spawn_ui(mut commands: Commands, assets: Res<AssetStore>) {
+            commands
+                .spawn()
+                .insert(UiEntity)
+                .insert_bundle(OrthographicCameraBundle::new_2d())
+                .insert_bundle(UiCameraBundle::default());
+
             let font = assets
                 .store
                 .get("font-zen")
@@ -241,41 +304,109 @@ mod stag {
                 .clone_weak()
                 .typed();
 
-            commands.spawn().insert(UiEntity).insert_bundle(TextBundle {
-                text: Text::with_section(
-                    "",
-                    TextStyle {
-                        font,
-                        font_size: 16.0,
-                        color: Color::SALMON,
+            commands
+                .spawn()
+                .insert(UiEntity)
+                .insert_bundle(NodeBundle {
+                    style: Style {
+                        size: Size {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                        },
+                        flex_direction: FlexDirection::ColumnReverse,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
                     },
-                    TextAlignment {
-                        vertical: VerticalAlign::Center,
-                        horizontal: HorizontalAlign::Center,
-                    },
-                ),
-                ..Default::default()
-            });
+                    color: UiColor(Color::NONE),
+                    ..default()
+                })
+                .with_children(|cb| {
+                    for text in ["Start", "Settings", "Infos", "Exit"] {
+                        cb.spawn().insert(UiEntity).insert_bundle(TextBundle {
+                            text: Text::with_section(
+                                text,
+                                TextStyle {
+                                    font: font.clone_weak(),
+                                    font_size: 64.0,
+                                    color: Color::NONE,
+                                },
+                                TextAlignment {
+                                    vertical: VerticalAlign::Center,
+                                    horizontal: HorizontalAlign::Center,
+                                },
+                            ),
+                            ..default()
+                        });
+                    }
+                });
         }
-
-        use bevy::ecs::component::Component;
 
         #[derive(Component)]
         struct UiEntity;
 
-        use crate::Config;
-
         fn cursor_input(
             key: Res<Input<KeyCode>>,
-            input: EventWriter<CursorInput>,
+            mut inputs: EventWriter<CursorInput>,
             config: Res<Config>,
         ) {
+            let config = &config.key.title;
+
+            if key.just_pressed(config.up) {
+                inputs.send(CursorInput::Up);
+            } else if key.just_pressed(config.down) {
+                inputs.send(CursorInput::Down);
+            } else if key.just_pressed(config.submit) {
+                inputs.send(CursorInput::Submit);
+            }
         }
 
-        fn cursor_handle(input: EventReader<CursorInput>, mut state: ResMut<State<CursorState>>) {}
+        fn cursor_handle(
+            mut inputs: EventReader<CursorInput>,
+            mut state: ResMut<CursorState>,
+            mut moves: EventWriter<CursorSubmit>,
+        ) {
+            if let Some(input) = inputs.iter().next() {
+                match *input {
+                    CursorInput::Up => {
+                        *state = state.prev();
+                    },
+                    CursorInput::Down => {
+                        *state = state.next();
+                    },
+                    CursorInput::Submit => {
+                        moves.send((*state).into());
+                    },
+                }
+            }
+        }
 
-        use bevy::ecs::entity::Entity;
-        use bevy::ecs::system::Query;
+        fn detect_move(mut moves: EventReader<CursorSubmit>, mut stage: ResMut<State<Stage>>) {
+            match moves.iter().next() {
+                Some(CursorSubmit::Start) => stage.set(Stage::Game).unwrap(),
+                Some(CursorSubmit::Settings) => stage.push(Stage::Settings).unwrap(),
+                Some(CursorSubmit::Infos) => stage.push(Stage::Infos).unwrap(),
+                Some(CursorSubmit::Exit) => stage.set(Stage::End).unwrap(),
+                None => (),
+            }
+        }
+
+        fn update_ui(state: Res<CursorState>, mut entities: Query<(&UiEntity, &mut Text)>) {
+            if !state.is_changed() {
+                return;
+            }
+
+            let state = state.as_str();
+            for (_, mut text) in entities.iter_mut() {
+                for section in text.sections.iter_mut() {
+                    if section.value == state {
+                        section.style.color = Color::SALMON;
+                    } else {
+                        section.style.color = Color::DARK_GRAY;
+                    }
+                }
+            }
+        }
 
         fn despawn_ui(mut commands: Commands, entities: Query<(Entity, &UiEntity)>) {
             for (entity, _) in entities.iter() {
@@ -285,8 +416,8 @@ mod stag {
     }
 
     pub mod game {
-        use bevy::app::{App, Plugin as PluginTrait};
-        use bevy::ecs::schedule::SystemSet;
+        use bevy::app::Plugin as PluginTrait;
+        use bevy::prelude::*;
 
         use crate::Stage::Game as SelfStage;
 
@@ -299,9 +430,8 @@ mod stag {
     }
 
     pub mod end {
-        use bevy::app::{App, AppExit, Plugin as PluginTrait};
-        use bevy::ecs::event::EventWriter;
-        use bevy::ecs::schedule::SystemSet;
+        use bevy::app::{AppExit, Plugin as PluginTrait};
+        use bevy::prelude::*;
 
         use crate::Stage::End as SelfStage;
 
