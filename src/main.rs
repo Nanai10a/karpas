@@ -440,6 +440,7 @@ mod stag {
 
             fn build(&self, app: &mut App) {
                 app.add_event::<FallingInput>();
+                app.add_event::<Landing>();
 
                 app.add_system_set(
                     SystemSet::on_enter(SelfStage)
@@ -451,7 +452,8 @@ mod stag {
                         .with_system(update_ui)
                         .with_system(tick_falling)
                         .with_system(falling_input)
-                        .with_system(falling_handle),
+                        .with_system(falling_handle)
+                        .with_system(handle_landing),
                 );
                 app.add_system_set(
                     SystemSet::on_exit(SelfStage)
@@ -567,23 +569,62 @@ mod stag {
                         )),
                         ..default()
                     },
+                    transform: Transform::from_xyz(0.0, 0.0, 0.0),
                     ..default()
-                })
-                .with_children(|cb| {
-                    let (x, y) = transform_as_in_area(5.0, 16.0);
+                });
 
-                    cb.spawn()
-                        .insert(FallingEntity)
+            for y in 0..=16 {
+                for x in [-1, 11].into_iter() {
+                    let (x, y) = transform_as_in_area(x as f32, y as f32);
+
+                    commands
+                        .spawn()
+                        .insert(MinoEntity)
+                        .insert(DummyMinoEntity)
                         .insert_bundle(SpriteBundle {
                             sprite: Sprite {
-                                color: Color::GREEN,
-                                custom_size: Some(Vec2::new(BLOCK_SIZE, BLOCK_SIZE)),
+                                custom_size: Some(Vec2::new(0.0, 0.0)),
                                 ..default()
                             },
-                            transform: Transform::from_translation(Vec3::new(x, y, 1.0)),
+                            transform: Transform::from_xyz(x, y, -1.0),
                             ..default()
                         });
-                });
+                }
+            }
+
+            for x in -1..11 {
+                let (x, y) = transform_as_in_area(x as f32, -1.0);
+
+                commands
+                    .spawn()
+                    .insert(MinoEntity)
+                    .insert(DummyMinoEntity)
+                    .insert_bundle(SpriteBundle {
+                        sprite: Sprite {
+                            custom_size: Some(Vec2::new(0.0, 0.0)),
+                            ..default()
+                        },
+                        transform: Transform::from_xyz(x, y, -1.0),
+                        ..default()
+                    });
+            }
+
+            spawn_falling(commands);
+            // .with_children(|cb| {
+            //     let (x, y) = transform_as_in_area(5.0, 16.0);
+            //
+            //     cb.spawn()
+            //         .insert(FallingEntity)
+            //         .insert_bundle(SpriteBundle {
+            //             sprite: Sprite {
+            //                 color: Color::GREEN,
+            //                 custom_size: Some(Vec2::new(BLOCK_SIZE,
+            // BLOCK_SIZE)),                 ..default()
+            //             },
+            //             transform: Transform::from_translation(Vec3::new(x,
+            // y, 1.0)),             ..default()
+            //         });
+            // });
             // for (x, y) in [(0.0, 0.0), (10.0, 0.0), (0.0, 16.0), (5.0, 8.0),
             // (4.0, 9.0)] {     let (x, y) =
             // transform_as_in_area(x, y);     cb.spawn()
@@ -622,12 +663,38 @@ mod stag {
         struct MinoEntity;
 
         #[derive(Component)]
+        struct DummyMinoEntity;
+
+        #[derive(Component)]
         struct FallingEntity;
+
+        fn is_movable(
+            entities: &Query<(&MinoEntity, &Transform), Without<FallingEntity>>,
+            target: &Transform,
+        ) -> bool {
+            let [tx, ty, _] = target.translation.to_array();
+            let (tx, ty) = untransform_as_in_area(tx, ty);
+
+            for (_, transform) in entities.iter() {
+                let [x, y, _] = transform.translation.to_array();
+                let (x, y) = untransform_as_in_area(x, y);
+
+                bevy::log::debug!("{} : {} | {} : {}", tx, x, ty, y); // magic code : slowing process?
+
+                if tx.round() == x.round() && ty.round() == y.round() {
+                    return false;
+                }
+            }
+
+            true
+        }
 
         fn tick_falling(
             mut stopwatch: Local<Stopwatch>,
             time: Res<Time>,
             mut entities: Query<(&FallingEntity, &mut Transform)>,
+            minos: Query<(&MinoEntity, &Transform), Without<FallingEntity>>,
+            mut landings: EventWriter<Landing>,
         ) {
             const THRESHOLD: f32 = 1.5;
 
@@ -642,8 +709,180 @@ mod stag {
             for (_, mut transform) in entities.iter_mut() {
                 let [x, y, z] = transform.translation.to_array();
 
-                *transform = Transform::from_translation(Vec3::new(x, y - BLOCK_SIZE, z));
+                let new_transform = transform.with_translation(Vec3::new(x, y - BLOCK_SIZE, z));
+
+                if !is_movable(&minos, &new_transform) {
+                    landings.send(Landing);
+                    continue;
+                }
+
+                *transform = new_transform;
             }
+        }
+
+        struct Landing;
+
+        fn p90_spin(mut transform: Transform) -> Transform {
+            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / 2.0));
+            transform
+        }
+
+        fn n90_spin(mut transform: Transform) -> Transform {
+            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / -2.0));
+            transform
+        }
+
+        // [+y]
+        // ^
+        // |
+        // + ---> [+x]
+
+        // [-- -- -- --]
+        // [   ++      ]
+        // [           ]
+        // [           ]
+        const I: [Transform; 4] = [
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(2.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [--         ]
+        // [-- ** --   ]
+        // [           ]
+        // [           ]
+        const J: [Transform; 4] = [
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [      --   ]
+        // [-- ** --   ]
+        // [           ]
+        // [           ]
+        const L: [Transform; 4] = [
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [  -- --    ]
+        // [  ** --    ]
+        // [           ]
+        // [           ]
+        const O: [Transform; 4] = [
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [   -- --   ]
+        // [-- **      ]
+        // [           ]
+        // [           ]
+        const S: [Transform; 4] = [
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [   --      ]
+        // [-- ** --   ]
+        // [           ]
+        // [           ]
+        const T: [Transform; 4] = [
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        // [-- --      ]
+        // [   ** --   ]
+        // [           ]
+        // [           ]
+        const Z: [Transform; 4] = [
+            Transform::from_xyz(-1.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 1.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(0.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+            Transform::from_xyz(1.0 * BLOCK_SIZE, 0.0 * BLOCK_SIZE, 0.0),
+        ];
+
+        fn handle_landing(
+            mut commands: Commands,
+            landings: EventReader<Landing>,
+            parents: Query<(Entity, &FallingEntity, &Children), With<FallingEntity>>,
+            sprites: Query<(&Sprite, &GlobalTransform)>,
+        ) {
+            if landings.is_empty() {
+                return;
+            }
+
+            for (parent, _, children) in parents.iter() {
+                commands.entity(parent).despawn_recursive();
+                for child in children.iter() {
+                    let (sprite, current_transform) = sprites.get(*child).unwrap();
+                    let sprite = sprite.clone();
+
+                    commands
+                        .spawn()
+                        .insert(MinoEntity)
+                        .insert_bundle(SpriteBundle {
+                            sprite,
+                            transform: (*current_transform).into(),
+                            ..default()
+                        });
+                }
+            }
+
+            spawn_falling(commands);
+        }
+
+        fn spawn_falling(mut commands: Commands) {
+            let (transforms, color) = match rand::random::<u8>() % 7 {
+                0 => (I, Color::AQUAMARINE),
+                1 => (J, Color::BLUE),
+                2 => (L, Color::ORANGE),
+                3 => (O, Color::YELLOW),
+                4 => (S, Color::GREEN),
+                5 => (T, Color::PINK),
+                6 => (Z, Color::RED),
+                _ => panic!(),
+            };
+
+            let (x, y) = transform_as_in_area(5.0, 16.0);
+
+            commands
+                .spawn()
+                .insert(FallingEntity)
+                .insert_bundle(SpriteBundle {
+                    sprite: Sprite {
+                        color: Color::OLIVE,
+                        custom_size: Some(Vec2::new(10.0, 10.0)),
+                        ..default()
+                    },
+                    transform: Transform::from_xyz(x, y, 1.0),
+                    ..default()
+                })
+                .with_children(|cb| {
+                    for transform in transforms.into_iter() {
+                        cb.spawn().insert_bundle(SpriteBundle {
+                            transform,
+                            sprite: Sprite {
+                                color,
+                                custom_size: Some(Vec2::new(BLOCK_SIZE, BLOCK_SIZE)),
+                                ..default()
+                            },
+                            ..default()
+                        });
+                    }
+                });
         }
 
         use crate::Config;
@@ -678,6 +917,8 @@ mod stag {
         fn falling_handle(
             mut inputs: EventReader<FallingInput>,
             mut entities: Query<(&FallingEntity, &mut Transform)>,
+            mut landings: EventWriter<Landing>,
+            minos: Query<(&MinoEntity, &Transform), Without<FallingEntity>>,
         ) {
             for input in inputs.iter() {
                 match *input {
@@ -685,32 +926,53 @@ mod stag {
                         for (_, mut transform) in entities.iter_mut() {
                             let [x, y, z] = transform.translation.to_array();
 
-                            *transform =
-                                Transform::from_translation(Vec3::new(x - BLOCK_SIZE, y, z));
+                            let new_transform =
+                                transform.with_translation(Vec3::new(x - BLOCK_SIZE, y, z));
+
+                            if is_movable(&minos, &new_transform) {
+                                *transform = new_transform;
+                            }
                         },
                     FallingInput::Right =>
                         for (_, mut transform) in entities.iter_mut() {
                             let [x, y, z] = transform.translation.to_array();
 
-                            *transform =
-                                Transform::from_translation(Vec3::new(x + BLOCK_SIZE, y, z));
+                            let new_transform =
+                                transform.with_translation(Vec3::new(x + BLOCK_SIZE, y, z));
+
+                            if is_movable(&minos, &new_transform) {
+                                *transform = new_transform;
+                            }
                         },
+
                     FallingInput::HardDrop =>
                         for (_, mut transform) in entities.iter_mut() {
                             let [x, y, z] = transform.translation.to_array();
-                            let (x, _) = untransform_as_in_area(x, y);
-                            let (x, y) = transform_as_in_area(x, 0.0);
+                            let (ux, mut uy) = untransform_as_in_area(x, y);
 
-                            *transform = Transform::from_translation(Vec3::new(x, y, z));
+                            let mut new_transform;
+                            loop {
+                                let (x, y) = transform_as_in_area(ux, uy);
+                                new_transform = transform.with_translation(Vec3::new(x, y, z));
+
+                                if !is_movable(&minos, &new_transform) {
+                                    break;
+                                }
+
+                                uy -= 1.0;
+                            }
+                            *transform = new_transform;
+
+                            landings.send(Landing);
                         },
 
                     FallingInput::P90Spin =>
                         for (_, mut transform) in entities.iter_mut() {
-                            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / 2.0));
+                            *transform = p90_spin(*transform);
                         },
                     FallingInput::N90Spin =>
                         for (_, mut transform) in entities.iter_mut() {
-                            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / -2.0));
+                            *transform = n90_spin(*transform);
                         },
                 };
             }
