@@ -40,7 +40,13 @@ impl Plugin for ConfigPlugin {
                     down: KeyCode::J,
                     submit: KeyCode::Return,
                 },
-                game: GameKeyConfig,
+                game: GameKeyConfig {
+                    left: KeyCode::H,
+                    right: KeyCode::L,
+                    hard_drop: KeyCode::J,
+                    p90_spin: KeyCode::G,
+                    n90_spin: KeyCode::S,
+                },
             },
         };
 
@@ -68,7 +74,13 @@ struct TitleKeyConfig {
     submit: KeyCode,
 }
 
-struct GameKeyConfig;
+struct GameKeyConfig {
+    left: KeyCode,
+    right: KeyCode,
+    hard_drop: KeyCode,
+    p90_spin: KeyCode,
+    n90_spin: KeyCode,
+}
 
 struct StagePlugin;
 impl Plugin for StagePlugin {
@@ -293,7 +305,6 @@ mod stag {
             commands
                 .spawn()
                 .insert(UiEntity)
-                .insert_bundle(OrthographicCameraBundle::new_2d())
                 .insert_bundle(UiCameraBundle::default());
 
             let font = assets
@@ -417,16 +428,302 @@ mod stag {
 
     pub mod game {
         use bevy::app::Plugin as PluginTrait;
+        use bevy::core::Stopwatch;
         use bevy::prelude::*;
 
+        use crate::AssetStore;
         use crate::Stage::Game as SelfStage;
 
         pub struct Plugin;
         impl PluginTrait for Plugin {
             fn name(&self) -> &str { "game" }
 
-            fn build(&self, app: &mut App) { app.add_system_set(SystemSet::on_update(SelfStage)); }
+            fn build(&self, app: &mut App) {
+                app.add_event::<FallingInput>();
+
+                app.add_system_set(
+                    SystemSet::on_enter(SelfStage)
+                        .with_system(spawn_ui)
+                        .with_system(spawn_area),
+                );
+                app.add_system_set(
+                    SystemSet::on_update(SelfStage)
+                        .with_system(update_ui)
+                        .with_system(tick_falling)
+                        .with_system(falling_input)
+                        .with_system(falling_handle),
+                );
+                app.add_system_set(
+                    SystemSet::on_exit(SelfStage)
+                        .with_system(despawn_ui)
+                        .with_system(despawn_area),
+                );
+            }
         }
+
+        fn spawn_ui(mut commands: Commands, assets: Res<AssetStore>) {
+            let font = assets
+                .store
+                .get("font-zen")
+                .as_ref()
+                .unwrap()
+                .clone_weak()
+                .typed();
+
+            commands
+                .spawn()
+                .insert(UiEntity)
+                .insert_bundle(UiCameraBundle::default());
+
+            commands
+                .spawn()
+                .insert(UiEntity)
+                .insert_bundle(NodeBundle {
+                    style: Style {
+                        size: Size {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                        },
+                        flex_direction: FlexDirection::ColumnReverse,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::FlexStart,
+                        ..default()
+                    },
+                    color: UiColor(Color::NONE),
+                    ..default()
+                })
+                .with_children(|cb| {
+                    cb.spawn()
+                        .insert(UiEntity)
+                        .insert(ScoreEntity)
+                        .insert(Score(0))
+                        .insert_bundle(TextBundle {
+                            text: Text::with_section(
+                                "",
+                                TextStyle {
+                                    font,
+                                    font_size: 48.0,
+                                    color: Color::ANTIQUE_WHITE,
+                                },
+                                TextAlignment {
+                                    vertical: VerticalAlign::Center,
+                                    horizontal: HorizontalAlign::Center,
+                                },
+                            ),
+                            style: Style {
+                                margin: Rect {
+                                    top: Val::Px(32.0),
+                                    ..default()
+                                },
+                                ..default()
+                            },
+                            ..default()
+                        });
+                });
+        }
+
+        #[derive(Component)]
+        struct ScoreEntity;
+
+        #[derive(Component)]
+        struct Score(u32);
+
+        fn update_ui(mut entities: Query<(&ScoreEntity, &mut Text, &Score), Changed<Score>>) {
+            for (_, mut text, score) in entities.iter_mut() {
+                for section in text.sections.iter_mut() {
+                    section.value = score.0.to_string();
+                }
+            }
+        }
+
+        fn despawn_ui(mut commands: Commands, entities: Query<(Entity, &UiEntity)>) {
+            for (entity, _) in entities.iter() {
+                commands.entity(entity).despawn();
+            }
+        }
+
+        #[derive(Component)]
+        struct UiEntity;
+
+        const BLOCK_SIZE: f32 = 48.0;
+        const AREA_SIZE: (f32, f32) = (BLOCK_SIZE * 10.0, BLOCK_SIZE * 16.0);
+
+        fn spawn_area(mut commands: Commands) {
+            commands
+                .spawn()
+                .insert(AreaEntity)
+                .insert_bundle(OrthographicCameraBundle::new_2d());
+
+            commands
+                .spawn()
+                .insert(AreaEntity)
+                .insert(AreaFieldEntity)
+                .insert_bundle(SpriteBundle {
+                    sprite: Sprite {
+                        color: Color::BLACK,
+                        custom_size: Some(Vec2::new(
+                            AREA_SIZE.0 + BLOCK_SIZE,
+                            AREA_SIZE.1 + BLOCK_SIZE,
+                        )),
+                        ..default()
+                    },
+                    ..default()
+                })
+                .with_children(|cb| {
+                    let (x, y) = transform_as_in_area(5.0, 16.0);
+
+                    cb.spawn()
+                        .insert(FallingEntity)
+                        .insert_bundle(SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::GREEN,
+                                custom_size: Some(Vec2::new(BLOCK_SIZE, BLOCK_SIZE)),
+                                ..default()
+                            },
+                            transform: Transform::from_translation(Vec3::new(x, y, 1.0)),
+                            ..default()
+                        });
+                });
+            // for (x, y) in [(0.0, 0.0), (10.0, 0.0), (0.0, 16.0), (5.0, 8.0),
+            // (4.0, 9.0)] {     let (x, y) =
+            // transform_as_in_area(x, y);     cb.spawn()
+            //         .insert(AreaEntity)
+            //         .insert(MinoEntity)
+            //         .insert_bundle(SpriteBundle {
+            //             sprite: Sprite {
+            //                 color: Color::YELLOW_GREEN,
+            //                 custom_size: Some(Vec2::new(BLOCK_SIZE,
+            // BLOCK_SIZE)),                 ..default()
+            //             },
+            //             transform: Transform::from_translation(Vec3::new(x,
+            // y, 1.0)),             ..default()
+            //         });
+            // }
+        }
+
+        fn transform_as_in_area(x: f32, y: f32) -> (f32, f32) {
+            (
+                BLOCK_SIZE * x - AREA_SIZE.0 / 2.0,
+                BLOCK_SIZE * y - AREA_SIZE.1 / 2.0,
+            )
+        }
+
+        fn untransform_as_in_area(x: f32, y: f32) -> (f32, f32) {
+            (
+                ((x + (AREA_SIZE.0 / 2.0)) / BLOCK_SIZE),
+                ((y + (AREA_SIZE.1 / 2.0)) / BLOCK_SIZE),
+            )
+        }
+
+        #[derive(Component)]
+        struct AreaFieldEntity;
+
+        #[derive(Component)]
+        struct MinoEntity;
+
+        #[derive(Component)]
+        struct FallingEntity;
+
+        fn tick_falling(
+            mut stopwatch: Local<Stopwatch>,
+            time: Res<Time>,
+            mut entities: Query<(&FallingEntity, &mut Transform)>,
+        ) {
+            const THRESHOLD: f32 = 1.5;
+
+            stopwatch.tick(time.delta());
+
+            if stopwatch.elapsed_secs() < THRESHOLD {
+                return;
+            }
+
+            stopwatch.reset();
+
+            for (_, mut transform) in entities.iter_mut() {
+                let [x, y, z] = transform.translation.to_array();
+
+                *transform = Transform::from_translation(Vec3::new(x, y - BLOCK_SIZE, z));
+            }
+        }
+
+        use crate::Config;
+        enum FallingInput {
+            Left,
+            Right,
+            HardDrop,
+            P90Spin,
+            N90Spin,
+        }
+
+        fn falling_input(
+            key: Res<Input<KeyCode>>,
+            mut inputs: EventWriter<FallingInput>,
+            config: Res<Config>,
+        ) {
+            let config = &config.key.game;
+
+            if key.just_pressed(config.left) {
+                inputs.send(FallingInput::Left);
+            } else if key.just_pressed(config.right) {
+                inputs.send(FallingInput::Right);
+            } else if key.just_pressed(config.hard_drop) {
+                inputs.send(FallingInput::HardDrop);
+            } else if key.just_pressed(config.p90_spin) {
+                inputs.send(FallingInput::P90Spin);
+            } else if key.just_pressed(config.n90_spin) {
+                inputs.send(FallingInput::N90Spin);
+            }
+        }
+
+        fn falling_handle(
+            mut inputs: EventReader<FallingInput>,
+            mut entities: Query<(&FallingEntity, &mut Transform)>,
+        ) {
+            for input in inputs.iter() {
+                match *input {
+                    FallingInput::Left =>
+                        for (_, mut transform) in entities.iter_mut() {
+                            let [x, y, z] = transform.translation.to_array();
+
+                            *transform =
+                                Transform::from_translation(Vec3::new(x - BLOCK_SIZE, y, z));
+                        },
+                    FallingInput::Right =>
+                        for (_, mut transform) in entities.iter_mut() {
+                            let [x, y, z] = transform.translation.to_array();
+
+                            *transform =
+                                Transform::from_translation(Vec3::new(x + BLOCK_SIZE, y, z));
+                        },
+                    FallingInput::HardDrop =>
+                        for (_, mut transform) in entities.iter_mut() {
+                            let [x, y, z] = transform.translation.to_array();
+                            let (x, _) = untransform_as_in_area(x, y);
+                            let (x, y) = transform_as_in_area(x, 0.0);
+
+                            *transform = Transform::from_translation(Vec3::new(x, y, z));
+                        },
+
+                    FallingInput::P90Spin =>
+                        for (_, mut transform) in entities.iter_mut() {
+                            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / 2.0));
+                        },
+                    FallingInput::N90Spin =>
+                        for (_, mut transform) in entities.iter_mut() {
+                            transform.rotate(Quat::from_rotation_z(std::f32::consts::PI / -2.0));
+                        },
+                };
+            }
+        }
+
+        fn despawn_area(mut commands: Commands, entities: Query<(Entity, &AreaEntity)>) {
+            for (entity, _) in entities.iter() {
+                commands.entity(entity).despawn();
+            }
+        }
+
+        #[derive(Component)]
+        struct AreaEntity;
     }
 
     pub mod end {
